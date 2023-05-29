@@ -1,0 +1,118 @@
+#################
+# Download demographic data with no NA
+
+demo_J = data.table(nhanes('DEMO_J'),YEAR='2017-2018')
+bmi_J = data.table(nhanes('BMX_J'), YEAR = '2017-2018')
+demo_J = merge(demo_J,bmi_J,by=c("SEQN","YEAR"))
+
+demo_J = demo_J[WTMEC2YR>0,.(SEQN,RIAGENDR,RIDAGEYR,WTMEC2YR,INDFMPIR,RIDRETH1,BMXBMI,YEAR)]
+demo_J[,SUM_MEC:=sum(demo_J$WTMEC2YR)]
+demo_J[, check := rowSums(.SD), .SDcol=c('RIAGENDR','RIDAGEYR','WTMEC2YR', 'INDFMPIR','RIDRETH1','BMXBMI')]
+demo_J = demo_J[!is.na(check)]
+demo_J[,check:=NULL]
+
+#################
+# Download PFCs data with no NA
+
+pfc_J = data.table(nhanes("PFAS_J"),YEAR='2017-2018')
+pfc_list <- c("LBXPFDE","LBXPFHS","LBXMPAH","LBXPFNA","LBXPFUA","LBXNFOA","LBXBFOA","LBXNFOS","LBXMFOS")
+pfc_J = pfc_J[,c("SEQN",pfc_list,"YEAR"),with=F]
+pfc_J[, check := rowSums(.SD), .SDcol=pfc_list]
+pfc_J = pfc_J[!is.na(check)]
+pfc_J[,check:=NULL]
+
+# #################
+# Download Metal data with no NA
+
+metal_J = data.table(nhanes("PBCD_J"),YEAR='2017-2018')
+metal_list <- c("LBXBCD","LBXBPB","LBXBMN","LBXTHG","LBXBSE")
+metal_J = metal_J[,c("SEQN",metal_list,"YEAR"),with=F]
+metal_J[, check := rowSums(.SD), .SDcol=metal_list]
+metal_J = metal_J[!is.na(check)]
+metal_J[,check:=NULL]
+
+#################
+# Download HDL, LDL, Trig, glychaemoglobin, insulin,  data with no NA
+
+trig_J = data.table(nhanes("TRIGLY_J"),YEAR='2017-2018')
+bones_J = trig_J
+bones_J = bones_J[,.(SEQN,LBXTR,LBDLDL,YEAR)]
+bones_J[, check := rowSums(.SD), .SDcol=c('LBXTR','LBDLDL')]
+bones_J = bones_J[!is.na(check)]
+bones_J[,check:=NULL]
+
+#################
+# Download smoking status data
+
+SMQ = data.table(nhanes("SMQ_J"),YEAR='2017-2018')
+SMQ = SMQ[,.(SEQN,SMQ020,SMQ040,YEAR)]
+SMQ = SMQ[!is.na(SMQ020)]
+SMQ[,smoking_status:=ifelse(SMQ020==2,0,ifelse(SMQ040==1 | SMQ040==2,2,1))]
+SMQ = SMQ[!is.na(smoking_status),.(SEQN,smoking_status,YEAR)]
+# SMQ[,smoking_status_ever_never:=ifelse(smoking_status==0,0,1)]
+
+###################
+# Download Blood pressure level
+
+BPX = data.table(nhanes("BPX_J"), YEAR = "2017-2018")
+BPX = BPX[,.(SEQN,BPXSY1,BPXSY2,BPXSY3, BPXSY4, BPXDI1, BPXDI2, BPXDI3, BPXDI4, YEAR)]
+BPX[, SY := rowMeans(.SD, na.rm = T), .SDcol = c('BPXSY1','BPXSY2','BPXSY3', 'BPXSY4')]
+BPX[, DI := rowMeans(.SD, na.rm = T), .SDcol = c('BPXDI1', 'BPXDI2', 'BPXDI3', 'BPXDI4')]
+BPX = BPX[!is.na(SY) & !is.na(DI)]
+BPX = BPX[,.(SEQN,SY,DI,YEAR)]
+
+
+##################
+# Download alcohol status data
+#
+ALQ = data.table(nhanes("ALQ_J"),YEAR='2017-2018')
+ALQ = ALQ[,.(SEQN,ALQ111 ,YEAR)]
+ALQ = ALQ[!is.na(ALQ111 )]
+ALQ[,alcohol := ifelse(ALQ111 ==2, 0, 1)]
+ALQ = ALQ[,.(SEQN,YEAR,alcohol)]
+
+#################
+# Download Activity data
+
+ACT = data.table(nhanes("PAQ_J"),YEAR='2017-2018')
+ACT = ACT[,.(SEQN,PAQ650,PAQ605, YEAR)]#,PAD320,PAD200)]
+ACT[!is.na(PAQ650) | !is.na(PAQ605),act := ifelse(PAQ650==1 | PAQ605==1, 1, 0)]
+ACT = ACT[,.(SEQN,act, YEAR)]
+
+###################
+# Combine data sets
+
+core_J = Reduce(function(...) merge(...,by=c("SEQN","YEAR")), list(demo_J,pfc_J,metal_J,bones_J,SMQ, ALQ, ACT))
+ecc <- core_J
+
+#################
+# Definition of the weights
+# clean weight outliers
+
+OutVals = boxplot(ecc$WTMEC2YR)$out
+ecc = ecc[-which(ecc$WTMEC2YR %in% OutVals)]
+ecc[,':='(hispanic = ifelse(RIDRETH1==1 | RIDRETH1==2,1,0),
+          white = ifelse(RIDRETH1==3,1,0),
+          black = ifelse(RIDRETH1==4 | RIDRETH1==5,1,0))]
+ecc = ecc[, RIAGENDR := RIAGENDR -1] 
+
+#################
+# Download drugs data with no NA
+
+drug_J = data.table(nhanes("RXQ_DRUG"),YEAR='2017-2018')
+drug_list <- c("RXDDRGID","RXDDRUG","RXDINGFL","RXDDCN1A","RXDDCN1B","RXDDCN1C","RXDDCN2A","RXDDCN2B","RXDDCN2C","RXDICN2A","RXDICN2B","RXDICN2C")
+drug_J = drug_J[,c(drug_list,"YEAR"),with=F]
+drug_J = drug_J[drug_J$RXDDRGID %in% c("d05048","d04105","d04140","d05348","d03183","d00280","d04787","d07110","d07637",
+                                       "d00348","d04851","d00746","d07805"),]
+
+drug_seq_J = data.table(nhanes("RXQ_RX_J"),YEAR='2017-2018')
+drug_seq_J = drug_seq_J[!is.na(drug_seq_J$RXDDRGID),c("SEQN","RXDUSE","RXDDRGID","RXDDAYS")]
+drug_seq_J = drug_seq_J[drug_seq_J$RXDDRGID %in% c("d05048","d04105","d04140","d05348","d03183","d00280","d04787","d07110","d07637",
+                                                   "d00348","d04851","d00746","d07805"),]
+
+drug_seq_J_wide <- reshape(drug_seq_J, idvar = "SEQN", timevar = c("RXDDRGID"), direction = "wide")
+drug_seq_J_wide <- as.data.frame(drug_seq_J_wide)
+# sum(is.na(rowSums(drug_seq_J_wide[,!(colnames(drug_seq_J_wide) %in% "SEQN")], na.rm = T)))
+
+seq_statin <- intersect(ecc$SEQN,drug_seq_J_wide$SEQN)
+ecc <- ecc[!(ecc$SEQN %in% seq_statin),] # remove people on any statin
