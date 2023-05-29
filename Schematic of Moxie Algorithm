@@ -1,0 +1,552 @@
+# n = 1000 and p = 50 
+# Detecting Two-ordered interactions
+
+## Create the design matrix
+
+make.SIGMA <- function(rho,dimension){
+  SIGMA = matrix(NA,dimension,dimension)
+  for(i in 1:dimension){
+    for(j in 1:dimension){
+      if(i != j){
+        a <- sign(rnorm(1,0,1))*rnorm(1,0.1, 0.01)
+        if(a>0) {SIGMA[i,j] = rho + a}
+        else if (a <0)  {SIGMA[i,j] = rho}
+      }
+      else if (i == j){
+        SIGMA[i,j] = 1
+      }
+    }
+  }
+  
+  (SIGMA + t(SIGMA))/2
+}
+
+make.X0 <- function(n, rho, p0){
+  X0 <- (mvtnorm::rmvnorm(n, mean = rep(0, nrow(make.SIGMA(rho, p0))), sigma = make.SIGMA(rho, p0)))
+}
+
+####################################################################################################
+
+n = 1000
+p0 = 50
+set.seed(111)
+X <- make.X0(n, 0.4, p0)
+covariates <- make.X0(n,0.1,4)
+data_sim <- as.data.frame(X)
+
+binarize <- function(x){
+  as.numeric(x > quantile(x , 0.51) )  
+}
+
+create.y <- function(x){
+  bb <- as.data.frame(apply(x, 2, binarize))
+  k <- rep(1,nrow(bb))
+  for(i in 1:ncol(bb)){
+    k <- k * bb[,i]
+  }
+  return(k)
+}
+
+interact_columns <- c(1,3)
+
+M <- 500
+cv.nrounds <- 20
+iter_max_depth <- 3
+pv_lower <- 0.05
+pv_upper <- 0.50
+
+final_two_int_n1000_p50 <- data.frame(unique_feature = NA_character_,  feature = NA_character_, Split = NA_character_, Direction = NA_character_,
+                                     Quality = NA_real_, length_feature = NA_real_, length_uniques_feature = NA_real_, stability = NA_real_,
+                                     n_people = NA_real_,
+                                     beta= NA_real_,
+                                     unique_split = NA_character_, p2n_ratio = NA_real_, stability_percentage  = NA_real_, max_depth = NA_real_,
+                                     method = NA_character_, iter = NA_real_)
+
+two_int_n1000_p50_irf <- data.frame(int = NA_character_,  prevalence = NA_real_ , precision  = NA_real_,
+                                   cpe  = NA_real_ , sta.cpe  = NA_real_,  fsd  = NA_real_, 
+                                   sta.fsd  = NA_real_,   mip  = NA_real_,  sta.mip  = NA_real_,  stability  = NA_real_ , iter  = NA_real_)
+two_int_n1000_p50_irf <- two_int_n1000_p50_irf  %>% mutate_if(is.factor, as.character)
+
+for(v in 1:100){
+
+  print(paste("round",v))
+  
+  y <-  (X[,1:2] %*% c(0.1,0.1)) +  create.y(X[,interact_columns]) + covariates %*% c(0.06,0.06,0.06,0.06)
+  
+  set.seed(runif(1,0,3.75e4))
+  data_sim$outcome <- y + rnorm(n, 0, 0.1)
+  
+  data_sim <- cbind(data_sim,covariates)
+  colnames(data_sim)[(p0+2):(p0+5)] <- paste0("cov",c(1:4))
+  exposures <- paste0("V",seq(1:p0))
+  gg <- gwqs(outcome ~ wqs + cov1 + cov2 + cov3 + cov4,
+             mix_name = exposures, data = data_sim, q = NULL, signal = "t2",
+             validation = 0, b = 500, rs = T,   n_vars = p0/2,
+             b1_pos = T,  family = "gaussian",plan_strategy = "multicore")
+  
+  
+  data_sim$residuals <-  gg$fit$residuals
+  data_sim$wqs <-  gg$wqs
+  
+  c_wwr <- data.frame(unique_feature = NA_character_,  feature = NA_character_, Split = NA_character_, Direction = NA_character_,
+                      Quality = NA_real_, length_feature = NA_real_, length_uniques_feature = NA_real_, stability = NA_real_, 
+                      n_people = NA_real_,
+                      beta= NA_real_, 
+                      unique_split = NA_character_, p2n_ratio = NA_real_, stability_percentage  = NA_real_, max_depth = NA_real_) 
+  c_wwr <- c_wwr %>% mutate_if(is.factor, as.character)
+  
+  for(m in 2:iter_max_depth){
+    
+    max_depth = m
+    
+    moxie_table <- data.frame(feature = NA_character_, Split = NA_character_, Direction = NA_character_,
+                              Quality = NA_real_)
+    moxie_table <- moxie_table %>% mutate_if(is.factor, as.character)
+    
+    moxie_table$feature <- as.character(moxie_table$feature)
+    moxie_table$Split <- as.character(moxie_table$Split)
+    moxie_table$Direction <- as.character(moxie_table$Direction)
+    
+    for(i in 1:M){
+      
+      data_sim_boot <- data_sim[sample(rownames(data_sim), nrow(data_sim)*0.75),]
+      d_data_sim_frame <- data_sim_boot
+      d_data_sim_matrix <- as.matrix(data_sim_boot[,(colnames(data_sim_boot) %in% paste0("V",seq(1:p0)))])
+      
+      
+      for(j in 1:cv.nrounds){
+        
+        param <- list(max_depth = max_depth,
+                      nthread = 1,
+                      eta = sample(c(0.1,0.2),1),
+                      min_child_weight=sample(c(1,2),1),
+                      subsample = sample(seq(0.5,0.9,0.1),1),
+                      colsample_bytree = sample(seq(0.5,0.9,0.1),1),
+                      colsample_bylevel= sample(seq(0.5,0.9,0.1),1), 
+                      colsample_bynode= sample(seq(0.5,0.9,0.1),1)) 
+        
+        tryCatch({
+          xgboost_model <- xgboost(data = d_data_sim_matrix, label = d_data_sim_frame$residuals, params = param, verbose = F, nrounds = cv.nrounds, 
+                                   objective = "reg:squarederror", eval_metric  = "rmse")
+        }, error=function(e){})
+        
+        
+        rt <- tryCatch({
+          xgb_tree <- as.data.frame(xgb.model.dt.tree(feature_names = paste0("V",seq(1:p0)),
+                                                      model = xgboost_model, trees = j-1))
+        }, error=function(e){})
+        
+        
+        if(!is.null(rt)){
+          ttt <- as.data.frame(xgb_tree)
+          
+          t_more <- ttt[1,]
+          
+          while (t_more$Feature[length(t_more$Feature)] != "Leaf"){
+            t_more <- rbind(t_more, ttt[ttt$ID ==  t_more[nrow(t_more),"No"],]) 
+          }
+          
+          moxie_table <- rbind(moxie_table, c(paste(t_more$Feature[1:(length(t_more$Feature) - 1)],collapse = "/"),
+                                              paste(t_more$Split[1:(length(t_more$Feature) - 1)],collapse = "/"),
+                                              "Greater", t_more$Quality[t_more$Feature == "Leaf"]))
+        }
+        
+      }
+    }
+    
+    moxie_table <- moxie_table[-1,]
+    
+    moxie_table$unique_feature <- rep(NA_character_, nrow(moxie_table))
+    moxie_table$length_feature <-rep(NA_real_, nrow(moxie_table))  
+    moxie_table <- moxie_table %>% mutate_if(is.factor, as.character)
+    
+    for(i in 1:nrow(moxie_table)){
+      xy <- strsplit(moxie_table$feature[i],"/")[[1]]
+      moxie_table$length_feature[i]  <- length(xy)
+      
+      xx <- unique(xy)
+      moxie_table$length_uniques_feature[i]  <- length(xx)
+      moxie_table$unique_feature[i] <- paste(levels(as.factor(xx)), collapse = "/")
+    }
+    
+    fds <- (table(moxie_table$length_feature))
+    
+    freq <- as.numeric(sort(table(moxie_table$unique_feature), decreasing = T))
+    sss <- names(sort(table(moxie_table$unique_feature), decreasing = T))
+    
+    data0 <- data.frame(unique_feature = sss,  stability = freq)
+    ddft <- (merge(moxie_table, data0, by   = "unique_feature"))
+    
+    
+    potential_moxie_table <- ddft[ddft$length_uniques_feature>1 & !is.na(ddft$feature),]
+    potential_moxie_table$n_people <- rep(NA_real_,nrow(potential_moxie_table))
+    potential_moxie_table$beta <- rep(NA_real_,nrow(potential_moxie_table))
+    potential_moxie_table <- potential_moxie_table %>% mutate_if(is.factor, as.character)
+    
+    data_sim_moxie <- data_sim
+    
+    for(i in 1:nrow(potential_moxie_table)){
+      
+      dd <- data_sim_moxie[,strsplit(potential_moxie_table$feature[i],"/")[[1]]]
+      x <-  as.numeric(strsplit(potential_moxie_table$Split[i],"/")[[1]])
+      ww <- rep(NA_real_, nrow(data_sim_moxie))
+      for(k in 1:length(x)){
+        if(length(x) == 1){
+          yy <- dd >= x[k] 
+          yy <- yy + 0
+          ww <- cbind(ww , yy)
+        }
+        else {
+          yy <- dd[,k] >= x[k] 
+          yy <- yy + 0
+          ww <- cbind(ww , yy)
+        }
+      }
+      
+      ww <- rowSums(ww, na.rm = T)
+      potential_moxie_table$n_people[i] <- length(ww[ww == length(x)])
+      
+      if( potential_moxie_table$n_people[i]  > nrow(data_sim) * pv_lower){
+        ww <- ifelse(ww == length(x), 1, 0)
+        data_sim_moxie$new_mox <- ww
+        ss <- summary(lm(outcome ~ wqs + new_mox  + cov1 + cov2 + cov3 + cov4 , data = data_sim_moxie))
+        
+        potential_moxie_table$beta[i] <- ss$coefficients[2,1]
+        
+      }
+      
+    }
+    
+    
+    ttp <- potential_moxie_table[!is.na(potential_moxie_table$beta)  & 
+                                   potential_moxie_table$beta > 0 & potential_moxie_table$n_people > nrow(data_sim) * pv_lower & potential_moxie_table$length_feature == max_depth,]
+    ttp <- ttp[ttp$stability >= quantile(ttp$stability, 0.95) ,]
+    ttp <- ttp[ttp$beta >= quantile(ttp$beta, 0.95),]
+    if(!is.na(nrow(ttp))){
+      uni <- unique(ttp$unique_feature)
+      for(i in 1:nrow(ttp)){
+        rt = rep(NA_real_,length(strsplit(ttp$unique_feature[i],"/")[[1]]))
+        for(j in 1:length(strsplit(ttp$unique_feature[i],"/")[[1]])){
+          x = strsplit(ttp$unique_feature[i],"/")[[1]]
+          rt[j] = max(as.numeric(strsplit(ttp$Split[i],"/")[[1]][which(strsplit(ttp$feature[i],"/")[[1]] %in% x[j])]))
+        }
+        ttp$unique_split[i] =  paste(rt,collapse =  "/")    
+      }
+    }
+    wwr <- ttp[1,]
+    for(i in 1:length(uni)){
+      wwr <- rbind(wwr, ttp[which(ttp$unique_feature %in% uni[i])[which.max(ttp[which(ttp$unique_feature %in% uni[i]),"stability"])],])
+    }
+    wwr <- wwr[-1,]
+    
+    dft <- potential_moxie_table[!is.na(potential_moxie_table$beta)  & 
+                                   potential_moxie_table$beta > 0 & potential_moxie_table$n_people > nrow(data_sim) * pv_lower,]
+    drr <- dft[dft$unique_feature %in% dft$unique_feature[dft$length_uniques_feature == max_depth], c("unique_feature","stability")]
+    udr <- unique(drr$unique_feature)
+    dyy <- data.frame(unique_feature = NA_character_, stability = NA_real_)
+    dyy <- dyy %>% mutate_if(is.factor, as.character)
+    
+    
+    for(i in 1:length(udr)){
+      dyy <- rbind(dyy, drr[which(drr$unique_feature %in% udr[i])[1],])
+    }
+    dyy <- dyy[-1,]
+    K <- dyy[!(dyy$unique_feature %in% wwr$unique_feature),]
+    
+    ddys <- dyy[order(dyy$stability, decreasing = T),]
+    wwr$p2n_ratio <-  (sort(K$stability, decreasing = T)[1])/(wwr$stability)
+    wwr$stability_percentage <- 100*wwr$stability/(as.numeric(fds)[names(fds) == max_depth])
+    wwr$max_depth <- max_depth
+    
+    c_wwr <- rbind(c_wwr, wwr)
+    
+  }
+  
+  c_wwr <- c_wwr[-1,]
+  if(!is.na(c_wwr$unique_feature[1]) ){
+    
+    rwn <- rownames(c_wwr)[c_wwr$length_uniques_feature != c_wwr$max_depth & c_wwr$p2n_ratio > 2/3]
+    rwn <- c(rwn, rownames(c_wwr)[c_wwr$length_uniques_feature == c_wwr$max_depth & (c_wwr$p2n_ratio > 1)])
+    rwn <- rwn[!is.na(rwn)]
+    if(length(rwn) != 0){
+      c_wwr <- c_wwr[!(rownames(c_wwr) %in% rwn),]
+    }
+  }  
+  
+  if(length(c_wwr$unique_feature) ==0){
+    final_tab <- c_wwr
+    final_tab[1,1] <- "Null"
+    final_tab$freq_each_unique_feature  <- NA_real_
+    final_tab$iter <- v
+  } else if (length(c_wwr$unique_feature) != 0){
+    c_wwr_uf <- c_wwr
+    if(length(c_wwr_uf$unique_feature) != 0){
+      c_wwr_uf$freq_each_unique_feature <- rep(NA_real_, nrow(c_wwr_uf))
+      
+      ch_oc <- data.frame(charac = names(table(unlist(strsplit(c_wwr_uf$unique_feature,"/")))), 
+                          frq = as.numeric(table(unlist(strsplit(c_wwr_uf$unique_feature,"/")))))
+      
+      for(i in 1:nrow(c_wwr_uf)){
+        c_wwr_uf$freq_each_unique_feature[i] <- paste(ch_oc$frq[ch_oc$charac %in% strsplit(c_wwr_uf$unique_feature[i],"/")[[1]]], collapse = "/")
+      }
+      drtp <- unlist(lapply((strsplit(c_wwr_uf$freq_each_unique_feature,"/")), function(x){sum(x %in% c("1"))}))
+      while (sum(drtp == 1)!=0) {
+        rrt <- which(drtp >= 1)
+        c_wwr_uf <- c_wwr_uf[-rrt,]
+        if(length(c_wwr_uf$unique_feature)==0){break}
+        ch_oc <- data.frame(charac = names(table(unlist(strsplit(c_wwr_uf$unique_feature,"/")))), 
+                            frq = as.numeric(table(unlist(strsplit(c_wwr_uf$unique_feature,"/")))))
+        
+        for(i in 1:nrow(c_wwr_uf)){
+          c_wwr_uf$freq_each_unique_feature[i] <- paste(ch_oc$frq[ch_oc$charac %in% strsplit(c_wwr_uf$unique_feature[i],"/")[[1]]], collapse = "/")
+        }
+        drtp <- unlist(lapply((strsplit(c_wwr_uf$freq_each_unique_feature,"/")), function(x){sum(x %in% c("1"))}))
+        if(length(drtp)==0){break}
+      }
+    }
+    
+    if(length(c_wwr_uf$unique_feature) != 0){
+      c_wwr_n <- c_wwr_uf[c_wwr_uf$n_people/n < pv_upper & (c_wwr_uf$stability_percentage > 1 | (c_wwr_uf$stability_percentage < 1 & c_wwr_uf$p2n_ratio < 2/3)),]
+    } else if (length(c_wwr_uf$unique_feature) == 0){
+      c_wwr_n <- c_wwr_uf
+    }
+    
+    if(length(c_wwr_uf$unique_feature) != 0 & length(c_wwr_n$unique_feature) != 0){
+      rrt <- which(unlist(lapply((strsplit(c_wwr_n$freq_each_unique_feature,"/")), function(x){sum(x %in% c("1"))})) >= 1)
+      if(length(rrt)!=0){
+        final_tab <- c_wwr_n[-rrt,]
+        if(length(final_tab$unique_feature) == 0){
+          final_tab[1,1] <- "Null"
+          final_tab$iter <- v
+        } else  final_tab$iter <- rep(v, length(final_tab$unique_feature))
+      } else if (length(rrt)==0){
+        final_tab <- c_wwr_n
+        final_tab$iter <- rep(v, length(final_tab$unique_feature))
+      }  
+    } else if(length(c_wwr_n$unique_feature) == 0 | length(c_wwr_uf$unique_feature) == 0 ){
+      final_tab <- c_wwr_n
+      final_tab[1,1] <- "Null"
+      final_tab$freq_each_unique_feature  <- NA_real_
+      final_tab$iter <- v
+    }
+  }
+  
+  factors <- paste0("cov",seq(1:4))
+  f_lm <- lm(as.formula(paste("outcome~", paste(factors, collapse="+"))), data = data_sim)
+  data_sim$lm_residuals <-  f_lm$residuals
+  factors <- paste0("V",seq(1:p0))
+  fit <- gbm(as.formula(paste("lm_residuals ~", paste(factors, collapse="+"))) , data = data_sim, distribution = "gaussian",
+             n.trees = 500, interaction.depth = iter_max_depth, shrinkage = 0.01,
+             bag.fraction = 0.8, cv.folds = 5)
+  best_iter <- gbm.perf(fit, plot.it = F, method = "cv")
+  
+  if(iter_max_depth == 3){
+    fh <- 0.10
+    if(sum(final_tab$unique_feature == "Null") != 0 & length(c_wwr$unique_feature) != 0){
+      
+      c_wwr_cut <- c_wwr[c_wwr$n_people/n > pv_lower & c_wwr$n_people/n < pv_upper,]
+      
+      if(length(c_wwr_cut$unique_feature) != 0){
+        ft <- unique(c_wwr_cut$unique_feature)
+        
+        int.h <- numeric(length(ft))
+        for (i in 1:length(ft)) {
+          int.h[i] <- interact.gbm(fit, data = data_sim, i.var = strsplit(ft[i],"/")[[1]], 
+                                   n.trees = best_iter)
+        }
+        int.h <- data.frame(x = ft, y = int.h)
+        int.h <- int.h[order(int.h$y, decreasing = TRUE), ]
+        if(length(int.h$x[!is.na(int.h$y) & int.h$y > fh])!= 0){
+          
+          final_interaction_frame <- c_wwr_cut[c_wwr_cut$unique_feature %in% int.h$x[int.h$y > 0.1],]
+          final_interaction_frame$method <- rep("Null/cwwr_non_null", length(int.h$x[int.h$y > fh]))
+          final_interaction_frame$iter <- rep(final_tab$iter, length(int.h$x[int.h$y > fh]))
+          
+        } else if(length(int.h$x[!is.na(int.h$y) & int.h$y > fh])== 0){
+          
+          final_interaction_frame <- final_tab[,colnames(final_tab) %in% colnames(c_wwr_cut) ]
+          final_interaction_frame$method <- rep("Null/cwwr_non_null", 1)
+          final_interaction_frame$iter <- rep(final_tab$iter, 1)
+        }
+      } else if (length(c_wwr_cut$unique_feature) == 0){
+        
+        final_interaction_frame <- final_tab[,colnames(final_tab) %in% colnames(c_wwr) ]
+        final_interaction_frame$method <- rep("Null/cwwr_non_null", 1)
+        final_interaction_frame$iter <- rep(final_tab$iter, 1)
+      }
+    } else if(sum(final_tab$unique_feature == "Null") != 0 & length(c_wwr$unique_feature) == 0){
+      
+      final_interaction_frame <- final_tab[,colnames(final_tab) %in% colnames(c_wwr) ]
+      final_interaction_frame$method <- rep("Null/cwwr_non_null", 1)
+      final_interaction_frame$iter <- rep(final_tab$iter, 1)
+    } else if(sum(final_tab$unique_feature == "Null") == 0){
+      
+      final_tab_ft <- unique(final_tab$unique_feature)
+      int.h <- numeric(length(final_tab_ft))
+      for (i in 1:length(final_tab_ft)) {
+        int.h[i] <- interact.gbm(fit, data = data_sim, i.var = strsplit(final_tab_ft[i],"/")[[1]], 
+                                 n.trees = best_iter)
+      }
+      int.h <- data.frame(x = final_tab_ft, y = int.h)
+      int.h <- int.h[order(int.h$y, decreasing = TRUE), ]
+      if(length(int.h$x[!is.na(int.h$y) & int.h$y > fh])!= 0){
+        names_int <- int.h$x[int.h$y > fh]
+      } else if (length(int.h$x[!is.na(int.h$y) & int.h$y > fh])== 0) {names_int <- NA_character_}
+      
+      cwwr_ft <- unique(c_wwr[!(c_wwr$unique_signature %in% final_tab$unique_feature) & c_wwr$n_people/n > pv_lower & c_wwr$n_people/n < pv_upper,c("unique_feature")])
+      
+      if(length(cwwr_ft)!= 0){
+        int.h <- numeric(length(cwwr_ft))
+        for (i in 1:length(cwwr_ft)) {
+          int.h[i] <- interact.gbm(fit, data = data_sim, i.var = strsplit(cwwr_ft[i],"/")[[1]], 
+                                   n.trees = best_iter)
+        }
+        int.h <- data.frame(x = cwwr_ft, y = int.h)
+        int.h <- int.h[order(int.h$y, decreasing = TRUE), ]
+        if(length(int.h$x[!is.na(int.h$y) & int.h$y > fh])!= 0){names_int <- c(names_int, int.h$x[!is.na(int.h$y) & int.h$y > fh])}
+      }
+      
+      if(sum(is.na(names_int)) == 0){
+        
+        final_interaction_frame <- c_wwr[c_wwr$unique_feature %in% names_int,]
+        final_interaction_frame$method <- rep("Non_Null/cwwr_non_null", nrow(final_interaction_frame))
+        final_interaction_frame$iter <- rep(unique(final_tab$iter), nrow(final_interaction_frame))
+      }  else if (sum(is.na(names_int)) != 0){
+        
+        final_interaction_frame <- data.frame(unique_feature = "Null",  feature = NA_character_, Split = NA_character_, Direction = NA_character_,
+                                              Quality = NA_real_, length_feature = NA_real_, length_uniques_feature = NA_real_, stability = NA_real_, 
+                                              n_people = NA_real_,
+                                              beta= NA_real_, 
+                                              unique_split = NA_character_, p2n_ratio = NA_real_, stability_percentage  = NA_real_, max_depth = NA_real_)
+        final_interaction_frame$method <- "Non_Null/cwwr_non_null"
+        final_interaction_frame$iter <- unique(final_tab$iter)
+      } 
+      
+    }
+    
+  } else if (iter_max_depth > 3 & sum(final_tab$unique_feature == "Null") == 0){
+    
+    fh <- 0.05
+    cwwr_ft <- unique(c_wwr[!(c_wwr$unique_signature %in% final_tab$unique_feature) & c_wwr$n_people/n > pv_lower & c_wwr$n_people/n < pv_upper,c("unique_feature")])
+    
+    if(length(cwwr_ft)!= 0){
+      int.h <- numeric(length(cwwr_ft))
+      for (i in 1:length(cwwr_ft)) {
+        int.h[i] <- interact.gbm(fit, data = data_sim, i.var = strsplit(cwwr_ft[i],"/")[[1]], 
+                                 n.trees = best_iter)
+      }
+      int.h <- data.frame(x = cwwr_ft, y = int.h)
+      int.h <- int.h[order(int.h$y, decreasing = TRUE), ]
+      if(length(int.h$x[!is.na(int.h$y) & int.h$y > fh])!= 0){
+        names_int <- c(int.h$x[!is.na(int.h$y) & int.h$y > fh])
+      } else if (length(int.h$x[!is.na(int.h$y) & int.h$y > fh])== 0){names_int <- NA_character_}
+    } else if (length(cwwr_ft)== 0){
+      names_int <- NA_character_
+    }
+    
+    if(sum(is.na(names_int)) == 0){
+      
+      final_interaction_frame <- c_wwr[c_wwr$unique_feature %in% unique(c(names_int, final_tab$unique_feature)),]
+      final_interaction_frame$method <- rep("Non_Null/cwwr_non_null", nrow(final_interaction_frame))
+      final_interaction_frame$iter <- rep(unique(final_tab$iter), nrow(final_interaction_frame))
+      
+    }  else if (sum(is.na(names_int)) != 0){
+      
+      final_interaction_frame <- c_wwr[c_wwr$unique_feature %in% unique(c(final_tab$unique_feature)),]
+      final_interaction_frame$method <- rep("Non_Null/cwwr_non_null", nrow(final_interaction_frame))
+      final_interaction_frame$iter <- rep(unique(final_tab$iter), nrow(final_interaction_frame))
+    }
+    
+  } else if (iter_max_depth > 3 & sum(final_tab$unique_feature == "Null") != 0){
+    
+    fh <- 0.05
+    cwwr_ft <- unique(c_wwr[c_wwr$n_people/n > pv_lower & c_wwr$n_people/n < pv_upper,c("unique_feature")])
+    
+    if(length(cwwr_ft)!= 0){
+      int.h <- numeric(length(cwwr_ft))
+      for (i in 1:length(cwwr_ft)) {
+        int.h[i] <- interact.gbm(fit, data = data_sim, i.var = strsplit(cwwr_ft[i],"/")[[1]], 
+                                 n.trees = best_iter)
+      }
+      int.h <- data.frame(x = cwwr_ft, y = int.h)
+      int.h <- int.h[order(int.h$y, decreasing = TRUE), ]
+      if(length(int.h$x[!is.na(int.h$y) & int.h$y > fh])!= 0){
+        names_int <- c(int.h$x[!is.na(int.h$y) & int.h$y > fh])
+      } else if (length(int.h$x[!is.na(int.h$y) & int.h$y > fh])== 0){names_int <- NA_character_}
+    } else if (length(cwwr_ft)== 0){
+      names_int <- NA_character_
+    }
+    
+    if(sum(is.na(names_int)) == 0){
+      
+      final_interaction_frame <- c_wwr[c_wwr$unique_feature %in% unique(c(names_int)),]
+      final_interaction_frame$method <- rep("Null/cwwr_non_null", nrow(final_interaction_frame))
+      final_interaction_frame$iter <- rep(unique(final_tab$iter), nrow(final_interaction_frame))
+      
+    }  else if (sum(is.na(names_int)) != 0){
+      
+      final_interaction_frame <- data.frame(unique_feature = "Null",  feature = NA_character_, Split = NA_character_, Direction = NA_character_,
+                                            Quality = NA_real_, length_feature = NA_real_, length_uniques_feature = NA_real_, stability = NA_real_, 
+                                            n_people = NA_real_,
+                                            beta= NA_real_, 
+                                            unique_split = NA_character_, p2n_ratio = NA_real_, stability_percentage  = NA_real_, max_depth = NA_real_)
+      final_interaction_frame$method <- "Null/cwwr_non_null"
+      final_interaction_frame$iter <- unique(final_tab$iter)
+    }
+    
+  }
+  
+  final_two_int_n1000_p50 <- rbind(final_two_int_n1000_p50, final_interaction_frame)
+  write.table(final_two_int_n1000_p50, "...../cts_fh_two_int_n1000_p50.txt", row.names = FALSE)
+  
+  
+  train.id <- 1:(2/3*n)
+  test.id <- setdiff(1:n, train.id)
+  fit <- iRF(x=data_sim[train.id,c(paste0("V",seq(1:p0)))], 
+             y=data_sim[train.id,"residuals"], 
+             xtest=data_sim[test.id,c(paste0("V",seq(1:p0)))], 
+             ytest=data_sim[test.id,"residuals"], 
+             n.iter=5, 
+             n.core=2,
+             select.iter = T,
+             n.bootstrap=500
+  )
+  
+  dypt <- as.data.frame(fit$interaction[fit$interaction$stability > 0.5,])
+  int <- NA_character_
+  if( length(dypt$int)!= 0 ){
+    fft <- strsplit(dypt$int,"+")
+    for(i in 1:length(fft)){
+      
+      t <- as.numeric(table(fft[i][[1]]))[names(table(fft[i][[1]])) == "V"]
+      y <- as.numeric(table(fft[i][[1]]))[names(table(fft[i][[1]])) == "+"]
+      if(length(y) != 0){
+        if(!is.na(t == y) & sum(t == y)!= 0){
+          int <- c(int, dypt$int[i])
+        }
+      }
+      
+    }
+    int <- int[-1]
+    if(length(int) != 0 ){
+      d_irf <- as.data.frame(dypt[dypt$int %in% int,])
+      d_irf$iter <- rep(unique(final_interaction_frame$iter), nrow(d_irf))
+    } else if (length(int) == 0){
+      d_irf <- data.frame(int = NA_character_,  prevalence = NA_real_ , precision  = NA_real_,
+                          cpe  = NA_real_ , sta.cpe  = NA_real_,  fsd  = NA_real_, 
+                          sta.fsd  = NA_real_,   mip  = NA_real_,  sta.mip  = NA_real_,  stability  = NA_real_ , iter  = NA_real_)
+      d_irf$iter <- rep(unique(final_interaction_frame$iter), nrow(d_irf))
+    }
+  } else if( length(dypt$int)== 0){
+    d_irf <- data.frame(int = NA_character_,  prevalence = NA_real_ , precision  = NA_real_,
+                        cpe  = NA_real_ , sta.cpe  = NA_real_,  fsd  = NA_real_, 
+                        sta.fsd  = NA_real_,   mip  = NA_real_,  sta.mip  = NA_real_,  stability  = NA_real_ , iter  = NA_real_)
+    d_irf$iter <- unique(final_interaction_frame$iter)
+    
+  }
+  
+  two_int_n1000_p50_irf <- rbind(two_int_n1000_p50_irf, d_irf)
+  write.table(two_int_n1000_p50_irf, "..../two_int_n1000_p50_irf.txt", row.names = FALSE)
+  
+}  
+
