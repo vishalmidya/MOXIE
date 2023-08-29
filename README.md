@@ -5,10 +5,7 @@ This article presents a step-by-step guide and intuitions to implement the MOXIE
 
 Assuming the main chemical mixture effect and the interactions are additive; we extracted the residuals (Pearson residuals in case of binary outcome) from this model. We treated the residual as the new outcome and used a machine learning-based prediction framework to discover non-linear combinations predictive of the outcome. The interactions are searched using the XGBoost algorithm by extracting its branches. A similar algorithm with WQS and a repeated hold-out signed-iterated Random Forest (rh-SiRF), has been explored in <sup>2,3</sup>.
 
-As noted in Midya et al.<sup>1</sup>, this combination of exposure mixture algorithms can search for multi-ordered and non-linear interactions even when the number of chemical exposures is large. Further, since these interactions are based on thresholds, i.e., these interactions mimic the classical toxicological paradigm in which an interaction occurs only if the concentrations of certain chemicals are above some threshold. We will illustrate the use of this algorithm through simulated data. 
-
-For detailed illustration, we included a CSV file containing the simulated data for 25 chemical exposures for 500 participants. It also contains four covariates and a continuous outcome. This fictitious dataset demonstrates how to use the WQS-SiRF algorithm. Please read the `WQS-SiRF-vignette.md` tab for further discussion. 
-
+As noted in Midya et al.<sup>1</sup>, this combination of exposure mixture algorithms can search for multi-ordered and non-linear interactions even when the number of chemical exposures is large. Further, since these interactions are based on thresholds, i.e., these interactions mimic the classical toxicological paradigm in which an interaction occurs only if the concentrations of certain chemicals are above some threshold. We will illustrate the use of this algorithm through simulated data in a vignette. However, please see the code schematic in `Schematic of Moxie Algorithm` for now. 
 
 ## Reference
 
